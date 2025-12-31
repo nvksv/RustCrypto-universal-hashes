@@ -10,137 +10,57 @@
 //! `N` is present only so that we can provide a `GenericPolyval` that
 //! is always generic.
 
+use crate::Block;
 use core::{
     num::Wrapping,
     ops::{Add, Mul},
 };
 
-use universal_hash::{
-    KeyInit, Reset, UhfBackend, UhfClosure, UniversalHash,
-    consts::{U1, U16},
-    crypto_common::{BlockSizeUser, KeySizeUser, ParBlocksSizeUser},
-};
-
 #[cfg(feature = "zeroize")]
 use zeroize::Zeroize;
 
-use crate::{Block, Key, Tag};
-
-/// **POLYVAL**: GHASH-like universal hash over GF(2^128).
-///
-/// Paramaterized on a constant that determines how many
-/// blocks to process at once: higher numbers use more memory,
-/// and require more time to re-key, but process data significantly
-/// faster.
-///
-/// (This constant is not used when acceleration is not enabled.)
-#[derive(Clone)]
-pub struct Polyval<const N: usize = 1> {
-    /// GF(2^128) field element input blocks are multiplied by
-    h: U64x2,
-
-    /// Field element representing the computed universal hash
-    s: U64x2,
-}
-
-impl<const N: usize> Polyval<N> {
-    /// Initialize POLYVAL with the given `H` field element and initial block
-    pub fn new_with_init_block(h: &Key, init_block: u128) -> Self {
-        Self {
-            h: h.into(),
-            s: init_block.into(),
-        }
-    }
-}
-
-impl<const N: usize> KeySizeUser for Polyval<N> {
-    type KeySize = U16;
-}
-
-impl<const N: usize> KeyInit for Polyval<N> {
-    /// Initialize POLYVAL with the given `H` field element
-    fn new(h: &Key) -> Self {
-        Self::new_with_init_block(h, 0)
-    }
-}
-
-impl<const N: usize> BlockSizeUser for Polyval<N> {
-    type BlockSize = U16;
-}
-
-impl<const N: usize> ParBlocksSizeUser for Polyval<N> {
-    type ParBlocksSize = U1;
-}
-
-impl<const N: usize> UhfBackend for Polyval<N> {
-    fn proc_block(&mut self, x: &Block) {
-        let x = U64x2::from(x);
-        self.s = (self.s + x) * self.h;
-    }
-}
-
-impl<const N: usize> UniversalHash for Polyval<N> {
-    fn update_with_backend(&mut self, f: impl UhfClosure<BlockSize = Self::BlockSize>) {
-        f.call(self);
-    }
-
-    /// Get POLYVAL result (i.e. computed `S` field element)
-    fn finalize(self) -> Tag {
-        let mut block = Block::default();
-
-        for (chunk, i) in block.chunks_mut(8).zip(&[self.s.0, self.s.1]) {
-            chunk.copy_from_slice(&i.to_le_bytes());
-        }
-
-        block
-    }
-}
-
-impl<const N: usize> Reset for Polyval<N> {
-    fn reset(&mut self) {
-        self.s = U64x2::default();
-    }
-}
-
-#[cfg(feature = "zeroize")]
-impl<const N: usize> Drop for Polyval<N> {
-    fn drop(&mut self) {
-        self.h.zeroize();
-        self.s.zeroize();
-    }
-}
-
-/// 2 x `u64` values
+/// POLYVAL field element implemented as 2 x `u64` values.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-struct U64x2(u64, u64);
+pub(super) struct FieldElement(u64, u64);
 
-impl From<&Block> for U64x2 {
-    fn from(bytes: &Block) -> U64x2 {
-        U64x2(
+impl FieldElement {
+    /// Decode field element from little endian bytestring representation.
+    #[inline]
+    pub(super) fn from_le_bytes(bytes: &Block) -> FieldElement {
+        Self(
             u64::from_le_bytes(bytes[..8].try_into().unwrap()),
             u64::from_le_bytes(bytes[8..].try_into().unwrap()),
         )
     }
+
+    /// Encode field element as little endian bytestring representation.
+    #[inline]
+    pub(super) fn to_le_bytes(self) -> Block {
+        let mut block = Block::default();
+        block[..8].copy_from_slice(&self.0.to_le_bytes());
+        block[8..].copy_from_slice(&self.1.to_le_bytes());
+        block
+    }
 }
 
-impl From<u128> for U64x2 {
+impl From<u128> for FieldElement {
     fn from(x: u128) -> Self {
-        U64x2((x >> 64) as u64, (x) as u64)
+        FieldElement((x >> 64) as u64, (x) as u64)
     }
 }
 
 #[allow(clippy::suspicious_arithmetic_impl)]
-impl Add for U64x2 {
+impl Add for FieldElement {
     type Output = Self;
 
     /// Adds two POLYVAL field elements.
     fn add(self, rhs: Self) -> Self::Output {
-        U64x2(self.0 ^ rhs.0, self.1 ^ rhs.1)
+        FieldElement(self.0 ^ rhs.0, self.1 ^ rhs.1)
     }
 }
 
 #[allow(clippy::suspicious_arithmetic_impl)]
-impl Mul for U64x2 {
+impl Mul for FieldElement {
     type Output = Self;
 
     /// Computes carryless POLYVAL multiplication over GF(2^128) in constant time.
@@ -198,12 +118,12 @@ impl Mul for U64x2 {
         v3 ^= v1 ^ (v1 >> 1) ^ (v1 >> 2) ^ (v1 >> 7);
         v2 ^= (v1 << 63) ^ (v1 << 62) ^ (v1 << 57);
 
-        U64x2(v2, v3)
+        FieldElement(v2, v3)
     }
 }
 
 #[cfg(feature = "zeroize")]
-impl Zeroize for U64x2 {
+impl Zeroize for FieldElement {
     fn zeroize(&mut self) {
         self.0.zeroize();
         self.1.zeroize();
